@@ -4,7 +4,11 @@ A command-line interface for interacting with your [Kybernesis](https://kybernes
 
 ## Installation
 
-### From source (recommended for now)
+```bash
+npm install -g kybernesis
+```
+
+### From source
 
 ```bash
 git clone https://github.com/KybernesisAI/kybernesis-cli.git
@@ -12,12 +16,6 @@ cd kybernesis-cli
 npm install
 npm run build
 npm install -g .
-```
-
-### From npm (coming soon)
-
-```bash
-npm install -g kybernesis
 ```
 
 ## Quick Start
