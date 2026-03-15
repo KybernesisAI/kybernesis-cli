@@ -62,15 +62,18 @@ export async function clearTokens(): Promise<void> {
 }
 
 /**
- * Register a dynamic OAuth client (DCR) if we don't have a stored clientId.
+ * Register a dynamic OAuth client (DCR) with the exact redirect URI.
+ * Must be called after the callback server starts so we know the port.
+ * The MCP SDK validates redirect_uri with exact string match, so the
+ * registered URI must include the port.
  */
-async function registerClient(): Promise<string> {
+async function registerClient(redirectUri: string): Promise<string> {
   const response = await fetch(`${API_BASE}/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       client_name: 'Kybernesis CLI',
-      redirect_uris: ['http://127.0.0.1/callback'],
+      redirect_uris: [redirectUri],
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       token_endpoint_auth_method: 'none',
@@ -96,18 +99,13 @@ async function registerClient(): Promise<string> {
  * 6. Save tokens
  */
 export async function login(): Promise<AuthTokens> {
-  // Check for existing client_id
-  const existing = await loadTokens();
-  let clientId = existing?.clientId;
-
-  if (!clientId) {
-    process.stdout.write('Registering CLI client...\n');
-    clientId = await registerClient();
-  }
-
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = generateCodeChallenge(codeVerifier);
   const state = generateState();
+
+  // We need the port before we can register the client (exact redirect_uri match),
+  // so start the server first, then do DCR with the actual port.
+  let clientId: string;
 
   return new Promise<AuthTokens>((resolve, reject) => {
     const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -148,7 +146,7 @@ export async function login(): Promise<AuthTokens> {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({
             grant_type: 'authorization_code',
-            client_id: clientId!,
+            client_id: clientId,
             code,
             code_verifier: codeVerifier,
             redirect_uri: `http://127.0.0.1:${port}/callback`,
@@ -191,7 +189,7 @@ export async function login(): Promise<AuthTokens> {
         }
 
         const tokens: AuthTokens = {
-          clientId: clientId!,
+          clientId,
           accessToken: tokenData.access_token,
           refreshToken: tokenData.refresh_token,
           expiresAt: Date.now() + tokenData.expires_in * 1000,
@@ -218,29 +216,38 @@ export async function login(): Promise<AuthTokens> {
       }
     });
 
-    // Listen on a random available port
+    // Listen on a random available port, then register the client with the exact URI
     server.listen(0, '127.0.0.1', async () => {
-      const port = (server.address() as { port: number }).port;
-      const redirectUri = `http://127.0.0.1:${port}/callback`;
-
-      const authorizeUrl = new URL(`${API_BASE}/authorize`);
-      authorizeUrl.searchParams.set('client_id', clientId!);
-      authorizeUrl.searchParams.set('redirect_uri', redirectUri);
-      authorizeUrl.searchParams.set('code_challenge', codeChallenge);
-      authorizeUrl.searchParams.set('code_challenge_method', 'S256');
-      authorizeUrl.searchParams.set('state', state);
-      authorizeUrl.searchParams.set('response_type', 'code');
-      authorizeUrl.searchParams.set('scope', 'read write');
-
-      process.stdout.write(`\nOpening browser to authenticate...\n`);
-      process.stdout.write(`If the browser doesn't open, visit:\n${authorizeUrl.toString()}\n\n`);
-      process.stdout.write('Waiting for authorization...\n');
-
       try {
-        const open = (await import('open')).default;
-        await open(authorizeUrl.toString());
-      } catch {
-        // If open fails, user has the URL printed above
+        const port = (server.address() as { port: number }).port;
+        const redirectUri = `http://127.0.0.1:${port}/callback`;
+
+        // Register a fresh client with the exact redirect URI (port included)
+        process.stdout.write('Registering CLI client...\n');
+        clientId = await registerClient(redirectUri);
+
+        const authorizeUrl = new URL(`${API_BASE}/authorize`);
+        authorizeUrl.searchParams.set('client_id', clientId);
+        authorizeUrl.searchParams.set('redirect_uri', redirectUri);
+        authorizeUrl.searchParams.set('code_challenge', codeChallenge);
+        authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+        authorizeUrl.searchParams.set('state', state);
+        authorizeUrl.searchParams.set('response_type', 'code');
+        authorizeUrl.searchParams.set('scope', 'read write');
+
+        process.stdout.write(`\nOpening browser to authenticate...\n`);
+        process.stdout.write(`If the browser doesn't open, visit:\n${authorizeUrl.toString()}\n\n`);
+        process.stdout.write('Waiting for authorization...\n');
+
+        try {
+          const open = (await import('open')).default;
+          await open(authorizeUrl.toString());
+        } catch {
+          // If open fails, user has the URL printed above
+        }
+      } catch (err) {
+        server.close();
+        reject(err);
       }
     });
 
